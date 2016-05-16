@@ -75,7 +75,7 @@ def get_full_set(seasonId):
 
 
 if __name__ == '__main__':
-    season = '20152016'
+    season = '20052006'
     skaters, goalies = get_roster(season)
 
     #pickle skaters
