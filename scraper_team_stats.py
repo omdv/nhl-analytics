@@ -60,11 +60,12 @@ if __name__ == '__main__':
 
 #PROCESSING PART
     # read existing dataframe
-    df = pd.read_sql('team_stats_by_game',engine)
+    df = pd.read_sql('team_stats_by_game',engine,index_col='gameId')
+    df = df.sort_index()
 
     # add season ID and gameTypeId
-    df['seasonId'] = df.apply(lambda x: int(str(x.gameId)[0:4]),axis=1)
-    df['gameTypeId'] = df.apply(lambda x: int(str(x.gameId)[5:6]),axis=1)
+    # df['seasonId'] = df.apply(lambda x: int(str(x.gameId)[0:4]),axis=1)
+    # df['gameTypeId'] = df.apply(lambda x: int(str(x.gameId)[5:6]),axis=1)
 
     # rewrite the dataframe
     df.to_sql('team_stats_by_game',engine,if_exists='replace')
