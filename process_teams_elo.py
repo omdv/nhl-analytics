@@ -123,8 +123,11 @@ if __name__ == '__main__':
     # read existing dataframe
     ts = pd.read_sql('team_stats_by_game',engine)
     
+    params = np.array([63,0.69])
+    df = get_elo_seasons([2005,2008,2011,2014],params)
+
     # minimize ELO parameters  
-    params0 = np.array([60,0.75])
+    # params0 = np.array([63,0.69])
     # val = elo_minimize_func(params)
-    res = minimize(elo_minimize_func, params0, method='BFGS',jac=False,tol=1.0e-5,
-                    options={'disp': True,'gtol':1e-8})
+    # res = minimize(elo_minimize_func, params0, method='Nelder-Mead',tol=1.0e-3,
+                    # options={'disp': True, 'maxiter': 20})
