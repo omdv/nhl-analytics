@@ -115,7 +115,7 @@ def get_elo_seasons(seasons,params):
 
 # objective function for minimization
 def elo_minimize_func(params):
-    df = get_elo_seasons([2011],params)
+    df = get_elo_seasons([2015],params)
     return (1.0-df.accuracy.mean())
 
 
@@ -124,10 +124,9 @@ if __name__ == '__main__':
     ts = pd.read_sql('team_stats_by_game',engine)
     
     params = np.array([63,0.69])
-    df = get_elo_seasons([2005,2008,2011,2014],params)
+    params = np.array([50,0.76])
+    # df = get_elo_seasons(np.arange(2005,2016),params)
 
     # minimize ELO parameters  
-    # params0 = np.array([63,0.69])
-    # val = elo_minimize_func(params)
-    # res = minimize(elo_minimize_func, params0, method='Nelder-Mead',tol=1.0e-3,
-                    # options={'disp': True, 'maxiter': 20})
+    res = minimize(elo_minimize_func, params, method='Nelder-Mead',tol=1.0e-3,
+                    options={'disp': True, 'maxiter': 20})
