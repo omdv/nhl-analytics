@@ -7,7 +7,9 @@ pd.options.mode.chained_assignment = None  #suppress chained assignment warning
 pd.options.display.float_format = '{:.2f}'.format
 
 #preparing postgres engine
-engine = create_engine('postgresql://postgres:e2p71828@localhost:5432/nhl')
+engine = create_engine('postgresql://postgres:postgrespassword@192.168.99.100:5432/nhlstats')
+# engine = create_engine('postgresql://postgres:e2p71828@localhost:5432/nhl')
+
 conn = engine.connect()
 
 # process the database and calculate ELO rating for one season
@@ -115,7 +117,7 @@ def get_elo_seasons(seasons,params):
 
 # objective function for minimization
 def elo_minimize_func(params):
-    df = get_elo_seasons([2015],params)
+    df = get_elo_seasons([2006,2008,2010,2012,2014],params)
     return (1.0-df.accuracy.mean())
 
 
@@ -123,9 +125,9 @@ if __name__ == '__main__':
     # read existing dataframe
     ts = pd.read_sql('team_stats_by_game',engine)
     
-    params = np.array([63,0.69])
-    params = np.array([50,0.76])
-    # df = get_elo_seasons(np.arange(2005,2016),params)
+    params = np.array([63,0.69]) #others
+    # params = np.array([50,0.76]) #2015 season
+    # df = get_elo_seasons(np.arange(2005,2016),[0.0,1.0])
 
     # minimize ELO parameters  
     res = minimize(elo_minimize_func, params, method='Nelder-Mead',tol=1.0e-3,

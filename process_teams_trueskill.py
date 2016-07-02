@@ -3,33 +3,14 @@ import numpy as np
 from sqlalchemy import create_engine
 from scipy.optimize import minimize
 from scipy.stats import norm
-# from math import erf, sqrt, pi, exp
 
 pd.options.mode.chained_assignment = None  #suppress chained assignment warning
-pd.options.display.float_format = '{:.2f}'.format
+pd.options.display.float_format = '{:.3f}'.format
 
 #preparing postgres engine
 engine = create_engine('postgresql://postgres:e2p71828@localhost:5432/nhl')
 conn = engine.connect()
 
-# # process the database and calculate ELO rating for one season
-# def process_trueskill_forward(season,params):
-    
- 
-
-#     return dfs
-    
-# # auxiliary function to get elo processed for several seasons
-# def get_trueskill_seasons(seasons,params):
-#     df = process_elo_forward(seasons[0],params)
-#     for season in seasons[1:]:
-#         df = pd.concat([df,process_elo_forward(season,params)])
-#     return df
-
-# # objective function for minimization
-# def trueskill_minimize_func(params):
-#     df = get_elo_seasons([2015],params)
-#     return (1.0-df.accuracy.mean())
 
 def v_function(t,e):
     denom = norm.cdf(t-e)
@@ -44,19 +25,16 @@ def w_function(t,e):
     v = v_function(t,e)
     return v*(v+t-e)
 
-
-if __name__ == '__main__':
-    # read existing dataframe
-    ts = pd.read_sql('team_stats_by_game',engine)
-    season = 2012
+# process the database and calculate ELO rating for one season
+def process_trueskill_forward(season,params):
 
     # TrueSkill params
     TSK_MEAN = 25.0
     TSK_SIGMA = TSK_MEAN/3
-    TSK_BETA = TSK_MEAN/6
-    TSK_DYNAMICS_FACTOR = TSK_MEAN/300
-    TSK_DRAW_PROB = 0.1
-
+    TSK_BETA = params[0] #TSK_MEAN/6
+    TSK_DYNAMICS_FACTOR = params[1] #TSK_MEAN/300
+    TSK_DRAW_PROB = 0.0
+    TSK_HOME_BONUS = params[2] #TSK_MEAN/10
     TSK_DRAW_MARGIN = norm.ppf(0.5*(TSK_DRAW_PROB+1))*\
                         np.sqrt(1 + 1)*TSK_BETA
 
@@ -64,8 +42,9 @@ if __name__ == '__main__':
     ts['preGameTSKsigma'] = -1.0
     ts['postGameTSKmean'] = -1.0
     ts['postGameTSKsigma'] = -1.0
+    ts['gameResultProbTSK'] = -1.0
     ts['gamePredictTSK'] = -1.0
-    ts['gameResultTSK'] = -1.0
+    ts['gameResultTSK'] = ts['gameResultELO']
     ts['accuracyTSK'] = 0.0
 
     dfs = ts[ts.seasonId == season].set_index(['gameId','gameLocationCode'])
@@ -86,29 +65,30 @@ if __name__ == '__main__':
             initAssign = False
         
         # Get team names and preGame stats
-        hMEAN = dfs.ix[g,'H'].preGameTSKmean
-        hSIGMA = dfs.ix[g,'H'].preGameTSKsigma
-        rMEAN = dfs.ix[g,'R'].preGameTSKmean
-        rSIGMA = dfs.ix[g,'R'].preGameTSKsigma
+        hMean = dfs.ix[g,'H'].preGameTSKmean+TSK_HOME_BONUS
+        hSigma = dfs.ix[g,'H'].preGameTSKsigma
+        rMean = dfs.ix[g,'R'].preGameTSKmean
+        rSigma = dfs.ix[g,'R'].preGameTSKsigma
 
         # Get game outcome
         # TODO: Introduce Overtime logic
         if (dfs.ix[g,'H'].gameResultELO > dfs.ix[g,'R'].gameResultELO):
             winner = 'H'
             loser = 'R'
+            homeBonus = TSK_HOME_BONUS
         else:
             winner = 'R'
             loser = 'H'
+            homeBonus = -TSK_HOME_BONUS
 
-        # Trueskill calculation
-        ccoef = np.sqrt(2*pow(TSK_BETA,2)+pow(hSIGMA,2)+pow(rSIGMA,2))
-        MeanDelta = dfs.ix[g,winner].preGameTSKmean-dfs.ix[g,loser].preGameTSKmean
+        # UPDATE SKILL
+        ccoef = np.sqrt(2*(TSK_BETA**2)+hSigma**2+rSigma**2)
+        meanDelta = dfs.ix[g,winner].preGameTSKmean-dfs.ix[g,loser].preGameTSKmean+homeBonus
 
         # v and w functions
-        TSK_v = v_function(MeanDelta/ccoef,TSK_DRAW_MARGIN/ccoef)
-        TSK_w = w_function(MeanDelta/ccoef,TSK_DRAW_MARGIN/ccoef)
+        TSK_v = v_function(meanDelta/ccoef,TSK_DRAW_MARGIN/ccoef)
+        TSK_w = w_function(meanDelta/ccoef,TSK_DRAW_MARGIN/ccoef)
 
-        # Updating values
         # Mean
         wMean = dfs.ix[g,winner].preGameTSKmean +\
             (dfs.ix[g,winner].preGameTSKsigma**2+TSK_DYNAMICS_FACTOR**2)/ccoef*TSK_v
@@ -144,59 +124,55 @@ if __name__ == '__main__':
             dfs.preGameTSKsigma.ix[nrix] = lSigma
 
 
-        # # #expected outcome of the game
-        # dpower = (rELO - hELO - ELO_HOMEBONUS)/ELO_DELTA/2.
-        # expHome = 1.0/(1.0+pow(10,dpower))
-        # dfs.gamePredict.ix[g,'H'] = 1.0/(1.0+pow(10,dpower))
-        # dfs.gamePredict.ix[g,'R'] = 1.0/(1.0+pow(10,-dpower))
-        
-        # # #get goals for the home team
-        # homeWin = dfs.ix[g,'H'].wins
-        # roadWin = dfs.ix[g,'R'].wins
-        # homeOTLoss = dfs.ix[g,'H'].otLosses
-        # roadOTLoss = dfs.ix[g,'R'].otLosses
+        # Expected outcome of the game
+        # if hMEAN > rMEAN:
+        #     dfs.gamePredictTSK.ix[g,'H'] = 1.0
+        #     dfs.gamePredictTSK.ix[g,'R'] = 0.0
+        # elif hMEAN < rMEAN:
+        #     dfs.gamePredictTSK.ix[g,'H'] = 0.0
+        #     dfs.gamePredictTSK.ix[g,'R'] = 1.0
+        # else:
+        #     dfs.gamePredictTSK.ix[g,'H'] = 0.5
+        #     dfs.gamePredictTSK.ix[g,'R'] = 0.5
+        nSigma = np.sqrt(hSigma**2+rSigma**2)
+        nMean = meanDelta
+        dfs.gameResultProbTSK.ix[g,winner] = 1 - norm.cdf(0,loc=nMean,scale=nSigma)
+        dfs.gameResultProbTSK.ix[g,loser] = norm.cdf(0,loc=nMean,scale=nSigma)
 
-        # # real score - home team
-        # if (homeWin == 1):
-        #     realHome = 1.0
-        # elif (roadWin == 1):
-        #     realHome = 0.0
-        
-        # # check for OT:
-        # if (homeOTLoss == 1):
-        #     realHome = 1.0-ELO_OTWIN_COEFF
-        # elif (roadOTLoss == 1):
-        #     realHome = ELO_OTWIN_COEFF
-        
-        # # real outcome of the game
-        # dfs.gameResult.ix[g,'H'] = realHome
-        # dfs.gameResult.ix[g,'R'] = 1.0 - realHome
+        # Calculate accuracy
+        # if (dfs.gameResultTSK.ix[g,'H'] > 0.5) &\
+        #     (dfs.gamePredictTSK.ix[g,'H'] > 0.5):
+        #     dfs.accuracyTSK.ix[g,'H'] = 1.0
+        #     dfs.accuracyTSK.ix[g,'R'] = 1.0
+        # elif (dfs.gameResultTSK.ix[g,'H'] < 0.5) &\
+        #     (dfs.gamePredictTSK.ix[g,'H'] < 0.5):
+        #     dfs.accuracyTSK.ix[g,'H'] = 1.0
+        #     dfs.accuracyTSK.ix[g,'R'] = 1.0
+    return dfs
 
-        # # post-game ELO rating
-        # deltaHome = ELO_K_FACTOR*(realHome-expHome)
-        # dfs.postGameELO.ix[g,'H'] = hELO + deltaHome
-        # dfs.postGameELO.ix[g,'R'] = rELO - deltaHome
+# auxiliary function to get elo processed for several seasons
+def get_trueskill_seasons(seasons,params):
+    df = process_trueskill_forward(seasons[0],params)
+    for season in seasons[1:]:
+        df = pd.concat([df,process_trueskill_forward(season,params)])
+    return df
 
-        # # calculate accuracy
-        # if (dfs.gameResult.ix[g,'H'] > 0.5) & (dfs.gamePredict.ix[g,'H'] > 0.5):
-        #     dfs.accuracy.ix[g,'H'] = 1.0
-        #     dfs.accuracy.ix[g,'R'] = 1.0
-        # elif (dfs.gameResult.ix[g,'H'] < 0.5) & (dfs.gamePredict.ix[g,'H'] < 0.5):
-        #     dfs.accuracy.ix[g,'H'] = 1.0
-        #     dfs.accuracy.ix[g,'R'] = 1.0
+# objective function for minimization
+def trueskill_minimize(params):
+    df = get_trueskill_seasons([2006,2010,2013],params)
+    return (1.0-df.accuracyTSK.mean())
 
-        
-        # # assign forward to a new preGameELO
-        # homeTeamFuture = dfs[(dfs.teamAbbrev == hTeam) &\
-        #     (dfs.index.get_level_values('gameId') > g)]
-        # roadTeamFuture = dfs[(dfs.teamAbbrev == rTeam) &\
-        #     (dfs.index.get_level_values('gameId') > g)]
-        
-        # if len(homeTeamFuture) > 0:
-        #     nhix = homeTeamFuture.iloc[0].name
-        #     dfs.preGameELO.ix[nhix] = hELO + deltaHome
-        
-        # if len(roadTeamFuture) > 0:
-        #     nrix = roadTeamFuture.iloc[0].name
-        #     dfs.preGameELO.ix[nrix] = rELO - deltaHome
+
+if __name__ == '__main__':
+    ts = pd.read_sql('team_stats_by_game',engine)
     
+    # season = 2011
+    # params = [25./6.,25./300.,0.0,25./10.]
+    params = [4.15,8.428e-1,2.53] #[4.15,8.428e-2,2.53] optimized - 2006,2010,2013
+    df = get_trueskill_seasons(np.arange(2005,2007),params)
+
+
+    # minimize parameters  
+    # params0 = np.array([25./6.,25./300.,0.0,25./10.])
+    # res = minimize(trueskill_minimize, params0, method='Nelder-Mead',
+                    # options={'disp': True, 'maxiter': 50})
