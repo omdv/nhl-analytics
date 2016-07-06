@@ -117,7 +117,7 @@ def get_elo_seasons(seasons,params):
 
 # objective function for minimization
 def elo_minimize_func(params):
-    df = get_elo_seasons([2006,2008,2010,2012,2014],params)
+    df = get_elo_seasons([2015],params)
     return (1.0-df.accuracy.mean())
 
 
@@ -131,4 +131,4 @@ if __name__ == '__main__':
 
     # minimize ELO parameters  
     res = minimize(elo_minimize_func, params, method='Nelder-Mead',tol=1.0e-3,
-                    options={'disp': True, 'maxiter': 20})
+                    options={'disp': True, 'maxiter': 30})
