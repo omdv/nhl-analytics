@@ -5,7 +5,8 @@ import pandas as pd
 import numpy as np
 import trueskill as ts
 import xgboost as xgb
-# from sqlalchemy import create_engine
+import datetime as dt
+import seaborn as sns
 from scipy.optimize import minimize
 from scipy.stats import norm
 from sklearn import metrics as mt
@@ -47,7 +48,7 @@ def win_probability(row):
     return norm.cdf(delta_mu / denom)
 
 # process to generate separate df with trueskill
-def trueskill_forward_pass(df,season,n_iter=3):
+def trueskill_forward_pass(df,season,n_iter=1):
     df = df[df.seasonId == season]
     # initialize containers for the results
     teams = {}
@@ -148,12 +149,26 @@ def trueskill_forward_pass(df,season,n_iter=3):
 
     return teams_df, teams
 
-## auxiliary function to get elo processed for several seasons
-#def get_trueskill_seasons(seasons,params):
-#    df = process_trueskill_forward(seasons[0],params)
-#    for season in seasons[1:]:
-#        df = pd.concat([df,process_trueskill_forward(season,params)])
-#    return df
+def trueskill_backward_pass(df,season):
+
+    return df
+
+def get_rest_days(df):
+    """
+    Expecting full as input df
+    """
+    for team in df.teamAbbrevHome.unique():
+        timeDelta = df[(df.teamAbbrevHome == team) |\
+            (df.teamAbbrevRoad == team)].gameDate.diff()
+        timeDelta.iloc[0] = dt.timedelta(days=120)
+        # timeDelta = [x.days for x in timeDelta]
+        df.loc[(df.teamAbbrevHome == team),'restDaysHome']=timeDelta
+        df.loc[(df.teamAbbrevRoad == team),'restDaysRoad']=timeDelta
+    
+    df['restDaysHome'] = df.apply(lambda x: x.restDaysHome.days,axis=1)
+    df['restDaysRoad'] = df.apply(lambda x: x.restDaysRoad.days,axis=1)
+
+    return df
 
 def run_single_xgboost(train,features,target,valsize,num_boost_round):
     """
@@ -203,26 +218,30 @@ def run_single_xgboost(train,features,target,valsize,num_boost_round):
         "eval_metric": "auc"
     }
 
-    print('XGBoost params: {}'.format(params))
-
     if valsize > 0:
         watchlist = [(dtrain, 'train'), (dvalid,'valid')]
     else:
         watchlist = [(dtrain, 'train')]
 
     gbm = xgb.train(params, dtrain, num_boost_round, evals=watchlist,\
-        early_stopping_rounds=early_stopping_rounds, verbose_eval=True)
+        early_stopping_rounds=early_stopping_rounds, verbose_eval=False)
 
     imp = get_importance(gbm, features)
     print('Importance array:\n{}'.format(imp))
 
     pred = gbm.predict(dtest, ntree_limit=gbm.best_iteration+1)
-    print('\nPredicting test...')
-    print('Matthews: {:.4f}'.format(mt.matthews_corrcoef(y_test,np.where(pred>0.5,1,0))))
-    print('Accuracy: {:.4f}'.format(mt.accuracy_score(y_test,np.where(pred>0.5,1,0))))
-    print('ROC: {:.4f}'.format(mt.roc_auc_score(y_test,pred)))
+    return gbm, imp, y_test, pred
 
-    return gbm, imp, pred
+def get_evaluation(true,pred,ths):
+    print('\nEvaluating test...')
+    print('AUC: {:.4f}'.format(mt.roc_auc_score(true,pred)))
+    pred = np.where(pred>ths,1,0)
+    print('Matthews: {:.4f}'.format(mt.matthews_corrcoef(true,pred)))
+    print('Accuracy: {:.4f}'.format(mt.accuracy_score(true,pred)))
+    print('Precision: {:.4f}'.format(mt.precision_score(true,pred)))
+    print('Recall: {:.4f}'.format(mt.recall_score(true,pred)))
+    print(mt.confusion_matrix(true,pred,labels=[0,1]))
+
 
 def get_importance(gbm, features):
     """
@@ -232,12 +251,35 @@ def get_importance(gbm, features):
     importance = importance/1.e-2/importance.values.sum()
     return importance
 
+def print_cm(cm, labels, hide_zeroes=False, hide_diagonal=False, hide_threshold=None):
+    """pretty print for confusion matrixes"""
+    columnwidth = max([len(x) for x in labels]+[5]) # 5 is value length
+    empty_cell = " " * columnwidth
+    # Print header
+    print "    " + empty_cell,
+    for label in labels: 
+        print "%{0}s".format(columnwidth) % label,
+    print
+    # Print rows
+    for i, label1 in enumerate(labels):
+        print "    %{0}s".format(columnwidth) % label1,
+        for j in range(len(labels)): 
+            cell = "%{0}.1f".format(columnwidth) % cm[i, j]
+            if hide_zeroes:
+                cell = cell if float(cm[i, j]) != 0 else empty_cell
+            if hide_diagonal:
+                cell = cell if i != j else empty_cell
+            if hide_threshold:
+                cell = cell if cm[i, j] > hide_threshold else empty_cell
+            print cell,
+        print
+
 
 if __name__ == '__main__':
     # TrueSkill params
     TSK_MEAN = 25.0
-    TSK_SIGMA = TSK_MEAN/3.
-    TSK_BETA = TSK_MEAN/6.
+    TSK_SIGMA = TSK_MEAN/6.
+    TSK_BETA = TSK_MEAN/3.
     TSK_TAU = TSK_MEAN/300.
     TSK_DRAW_PROB = 0.0
     TSK_HOME_BONUS = TSK_MEAN/10.
@@ -254,8 +296,18 @@ if __name__ == '__main__':
 
     season = 2011
     teams, dfs = trueskill_forward_pass(df,season,n_iter=1)
+    dfs = get_rest_days(dfs)
 
     dfs['winProb'] = dfs.apply(win_probability,axis=1)
 
-    features=['winProb']
-    gbm,imp,pred = run_single_xgboost(dfs,features,"winsHome",10,100)
+    features=[
+        'preMeanHome',
+        'preStdHome',
+        'preMeanRoad',
+        'preStdRoad',
+        'restDaysHome',
+        'restDaysRoad',
+    ]
+    gbm,imp,true,pred = run_single_xgboost(dfs,features,"winsHome",10,100)
+    get_evaluation(true,pred,0.5)
+
