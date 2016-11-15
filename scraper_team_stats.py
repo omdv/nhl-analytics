@@ -26,13 +26,13 @@ conn = engine.connect()
 
 #get team summary by season by game type
 def get_team_summary_by_season(season):
-    print 'Parsing: '+str(season)
+    print('Parsing: '+str(season))
     
     url = 'http://www.nhl.com/stats/rest/grouped/teams/game/'
     url = url + 'teamsummary?cayenneExp=seasonId='+season
     
     res = requests.get(url, headers = hdrs)
-    data = json.loads(res.content)
+    data = json.loads(res.content.decode('utf-8'))
     return pd.DataFrame(data['data'])
 
 
@@ -42,12 +42,12 @@ if __name__ == '__main__':
 
 #SCRAPER PART
     # mapping first season
-    df = get_team_summary_by_season('20052006')
+    df = get_team_summary_by_season('20162017')
 
-    # iterate over seasons
-    for season in seasonId:
-      time.sleep(10)
-      df = pd.concat([df,get_team_summary_by_season(season)])
+    # # iterate over seasons
+    # for season in seasonId:
+    #   time.sleep(10)
+    #   df = pd.concat([df,get_team_summary_by_season(season)])
 
 #PROCESSING PART
     df.drop_duplicates(inplace=True)
@@ -57,11 +57,10 @@ if __name__ == '__main__':
     df['gameType'] = df.apply(lambda x: int(str(x.gameId)[5:6]),axis=1)
 
     df.gameType = df.gameType.astype('category')
-    df.gameType = df.gameType.cat.rename_categories(['R','P'])
+    df.gameType = df.gameType.cat.rename_categories(['R','C1','C2','C3'])
 
     del df['ties']
     del df['gamesPlayed']
-
 
     dfh = df[df.gameLocationCode=='H']
     dfr = df[df.gameLocationCode=='R']
@@ -110,8 +109,15 @@ if __name__ == '__main__':
         'seasonIdHome':'seasonId',
         'gameTypeHome':'gameType'},\
       inplace=True)
-    df = df.set_index('gameId')
+    # df = df.set_index('gameId')
 
-    df.to_sql('team_stats_by_game',engine,if_exists='append')
+    # merge with existing
+    df_old = pd.read_sql('team_stats_by_game',engine)
+    df = pd.concat([df_old,df])
+    df.drop_duplicates(inplace=True)
+    
+    df.set_index('gameId',inplace=True)
+
+    df.to_sql('team_stats_by_game',engine,if_exists='replace')
 
 

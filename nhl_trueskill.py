@@ -4,6 +4,9 @@
 import pandas as pd
 import numpy as np
 import trueskill as ts
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import xgboost as xgb
 import datetime as dt
 import seaborn as sns
@@ -11,23 +14,46 @@ from scipy.optimize import minimize
 from scipy.stats import norm
 from sklearn import metrics as mt
 from sklearn.cross_validation import train_test_split
-
+from sqlalchemy import create_engine
+from scraper_schedule import get_schedule_by_dates
 
 np.random.seed(42)
-# pd.options.display.float_format = '{:.4f}'.format
+pd.options.display.float_format = '{:.2f}'.format
 
 #preparing postgres engine
-# engine = create_engine('postgresql://postgres:@192.168.99.100:5432/nhlstats')
-# conn = engine.connect()
+engine = create_engine('postgresql://postgres:@192.168.99.100:5432/nhlstats')
 
 def read_dataset():
     print("Load csv...")
-    df = pd.read_csv('team_stats_by_game.csv',parse_dates=['gameDate'])
+    df = pd.read_sql('team_stats_by_game',engine,parse_dates=['gameDate'])
+
+    # choose only nhl games
+    df = df[(df.gameType=='R') | (df.gameType=='P')]
+
+    df['dtindex'] = pd.DatetimeIndex(df.gameDate)
+    startDate = df[df.gameId==2005020001].dtindex
+    df['timeShift'] = df.apply(lambda row: (row.dtindex-startDate), axis=1)
+    df['timeShift'] = df.apply(lambda row: row['timeShift'].days, axis=1)
 
     print('Process dataset...')
     df['gameType'],fct = pd.factorize(df.gameType)
     df = df.set_index('gameId').sort_values(by='gameDate')
     return df
+
+def merge_with_schedule(df,sch):
+    print("Merging df with new games...")
+
+    del sch['gameId']
+    df = pd.concat([df,sch])
+
+    del df['dtindex']
+    df['dtindex'] = pd.DatetimeIndex(df.gameDate)
+    startDate = df[df.gameId==2005020001].dtindex
+    df['timeShift'] = df.apply(lambda row: (row.dtindex-startDate), axis=1)
+    df['timeShift'] = df.apply(lambda row: row['timeShift'].days, axis=1)    
+    df = df.set_index('gameId').sort_values(by='gameDate')
+    return df
+
 
 def v_function(t,e):
     denom = norm.cdf(t-e)
@@ -69,9 +95,9 @@ def trueskill_forward_pass(df,season,n_iter=1):
                 teams[t] = []
 
         # Forward pass
-        for g in np.sort(df.index.unique()):
+        for gId in np.sort(df.index.unique()):
             # Get team names and preGame stats
-            game = df.ix[g]
+            game = df.ix[gId]
             hTeam = game.teamAbbrevHome
             rTeam = game.teamAbbrevRoad
             hMean = lastTeamRating[hTeam]['mu']
@@ -97,7 +123,7 @@ def trueskill_forward_pass(df,season,n_iter=1):
                 loser['preRating'] = ts.Rating(mu=hMean,sigma=hSigma)
                 loser['GameLoc'] = 'H'
             
-            # Calculation
+            # Update TrueSkill
             winner['postRating'],loser['postRating'] =\
                 ts.rate_1vs1(winner['preRating'],loser['preRating'],env=env)
 
@@ -110,7 +136,7 @@ def trueskill_forward_pass(df,season,n_iter=1):
                 team = {}
                 team['teamAbbrev'] = p['teamAbbrev']
                 team['gameDate'] = game.gameDate
-                team['gameId'] = g
+                team['gameId'] = gId
                 team['preMean'] = float(p['preRating'].mu)
                 team['preStd'] = float(p['preRating'].sigma)
                 team['postMean'] = float(p['postRating'].mu)
@@ -120,38 +146,67 @@ def trueskill_forward_pass(df,season,n_iter=1):
                 a.append(team.copy())
                 teams[p['teamAbbrev']] = a
 
-    # Convert to teams df
+    # Convert result to dataframe
     k = list(teams)
-    teams_df = pd.DataFrame(teams[k[0]])
+    teams_as_df = pd.DataFrame(teams[k[0]])
     for t in k[1:]:
-        teams_df = pd.concat([teams_df,pd.DataFrame(teams[t])])
+        teams_as_df = pd.concat([teams_as_df,pd.DataFrame(teams[t])])
+
+    return teams_as_df.sort_values(by='gameId')
+
+def merge_teams_with_df(df,teams):
+    """
+    Expecting full df and teams df
+    Merged df as a result
+    """
 
     # Merge teams
-    teams_home = teams_df[teams_df.gameLoc == 'H']
+    teams_home = teams[teams.gameLoc == 'H']
     del teams_home['gameLoc']
     del teams_home['gameDate']
     del teams_home['teamAbbrev']
-    columns = teams_home.columns
     columns = [row+'Home' if row not in ['gameId','gameDate']\
-               else row for row in columns]
+               else row for row in teams_home.columns]
     teams_home.columns = columns
 
-    teams_road = teams_df[teams_df.gameLoc == 'R']
+    teams_road = teams[teams.gameLoc == 'R']
     del teams_road['gameLoc']
     del teams_road['gameDate']
     del teams_road['teamAbbrev']
-    columns = teams_road.columns
-    columns = [row+'Road' if row not in ['gameId'] else row for row in columns]
+    columns = [row+'Road' if row not in ['gameId']\
+                else row for row in teams_road.columns]
     teams_road.columns = columns
 
     teams = pd.merge(teams_home,teams_road,on='gameId')
-    teams = pd.merge(df.reset_index(),teams,on='gameId').set_index('gameId')
-
-    return teams_df, teams
-
-def trueskill_backward_pass(df,season):
-
+    df = pd.merge(df.reset_index(),teams,on='gameId').set_index('gameId')
     return df
+
+def proces_trueskill_forward():
+    # TrueSkill params
+    TSK_MEAN = 1200.0
+    TSK_SIGMA = TSK_MEAN/3.
+    TSK_BETA = TSK_MEAN/2.
+    TSK_TAU = TSK_MEAN/300.
+    TSK_DRAW_PROB = 0.0
+    TSK_HOME_BONUS = TSK_MEAN/10.
+
+    # Trueskill setup
+    env=ts.TrueSkill(
+        mu=TSK_MEAN,
+        sigma=TSK_SIGMA,
+        beta=TSK_BETA,
+        tau=TSK_TAU,
+        draw_probability=TSK_DRAW_PROB)
+
+    season = 2011
+
+    # tms = trueskill_forward_pass(df,season,n_iter=1)
+    # dfs = merge_teams_with_df(df,tms)
+    # dfs = get_rest_days(dfs)
+
+    # dfs['winProb'] = dfs.apply(win_probability,axis=1)
+    # print('ROC: {:.4f}'.format(mt.roc_auc_score(dfs.winsHome,dfs.winProb)))
+    return 0
 
 def get_rest_days(df):
     """
@@ -160,6 +215,7 @@ def get_rest_days(df):
     for team in df.teamAbbrevHome.unique():
         timeDelta = df[(df.teamAbbrevHome == team) |\
             (df.teamAbbrevRoad == team)].gameDate.diff()
+        # add off-season
         timeDelta.iloc[0] = dt.timedelta(days=120)
         # timeDelta = [x.days for x in timeDelta]
         df.loc[(df.teamAbbrevHome == team),'restDaysHome']=timeDelta
@@ -234,8 +290,8 @@ def run_single_xgboost(train,features,target,valsize,num_boost_round):
 
 def get_evaluation(true,pred,ths):
     print('\nEvaluating test...')
-    print('AUC: {:.4f}'.format(mt.roc_auc_score(true,pred)))
     pred = np.where(pred>ths,1,0)
+    print('AUC: {:.4f}'.format(mt.roc_auc_score(true,pred)))
     print('Matthews: {:.4f}'.format(mt.matthews_corrcoef(true,pred)))
     print('Accuracy: {:.4f}'.format(mt.accuracy_score(true,pred)))
     print('Precision: {:.4f}'.format(mt.precision_score(true,pred)))
@@ -251,63 +307,116 @@ def get_importance(gbm, features):
     importance = importance/1.e-2/importance.values.sum()
     return importance
 
-def print_cm(cm, labels, hide_zeroes=False, hide_diagonal=False, hide_threshold=None):
-    """pretty print for confusion matrixes"""
-    columnwidth = max([len(x) for x in labels]+[5]) # 5 is value length
-    empty_cell = " " * columnwidth
-    # Print header
-    print "    " + empty_cell,
-    for label in labels: 
-        print "%{0}s".format(columnwidth) % label,
-    print
-    # Print rows
-    for i, label1 in enumerate(labels):
-        print "    %{0}s".format(columnwidth) % label1,
-        for j in range(len(labels)): 
-            cell = "%{0}.1f".format(columnwidth) % cm[i, j]
-            if hide_zeroes:
-                cell = cell if float(cm[i, j]) != 0 else empty_cell
-            if hide_diagonal:
-                cell = cell if i != j else empty_cell
-            if hide_threshold:
-                cell = cell if cm[i, j] > hide_threshold else empty_cell
-            print cell,
-        print
+def save_for_infernet(df):
+    df = df.reset_index().set_index('gameDate')
 
+    fields = [
+        'teamIdHome',
+        'teamIdRoad',
+        'seasonId',
+        'winsHome',
+        'timeShift',
+        'gameId'
+    ]
+    short = df[fields].sort_values(by='gameId')
+    short.to_csv('trueskill_in.csv',index=False)
+    return short
+
+def merge_with_infernet(df):
+    tsk = pd.read_csv('trueskill_out.csv',sep="|",header=None)
+    means = tsk.applymap(lambda x: float(str(x)[9:-1].split(",")[0]))
+    means.index = means.index
+    means = means.stack().reset_index()
+    means.columns = ['timeShift','teamId','tsMean']    
+
+    for key in ['teamIdHome','teamIdRoad']:
+        df = pd.merge(df,means,left_on=['timeShift',key],right_on=['timeShift','teamId'],how='left')
+        del df['teamId']
+        df.rename(columns={'tsMean':key+'Mean'}, inplace=True)
+
+    std = tsk.applymap(lambda x: float(str(x)[9:-1].split(",")[1]))
+    std = std.stack().reset_index()
+    std.columns = ['timeShift','teamId','tsMean']
+
+    for key in ['teamIdHome','teamIdRoad']:
+        df = pd.merge(df,std,left_on=['timeShift',key],right_on=['timeShift','teamId'],how='left')
+        del df['teamId']
+        df.rename(columns={'tsMean':key+'Std'}, inplace=True)
+        df[key+'Std'] = np.sqrt(df[key+'Std'])
+
+    return df,means,std
+
+# function to get trueskill by team
+def get_tsk_by_team(df,window=10):
+    meanByTeam = {}
+    stdByTeam = {}
+    for team in df.teamIdHome.unique():
+        meanByTeam[team] = pd.concat([df[(df.teamIdHome==team)].teamIdHomeMean,
+            df[df.teamIdRoad==team].teamIdRoadMean]).sort_index()
+        stdByTeam[team] = pd.concat([df[(df.teamIdHome==team)].teamIdHomeStd,
+            df[df.teamIdRoad==team].teamIdRoadStd]).sort_index()
+    meanByTeam = pd.DataFrame(meanByTeam)
+    stdByTeam = pd.DataFrame(stdByTeam)
+    meanByTeam = meanByTeam.rolling(window=window,min_periods=1).mean()
+    stdByTeam = stdByTeam.rolling(window=window,min_periods=1).mean()
+    return meanByTeam,stdByTeam
+
+# get previous trueskill for the team for the current game
+def get_previous_tsk(row,means,stds):
+    if row.name > 0:
+        row['homeMean'] = means.ix[0:row.name,row.teamIdHome].iloc[-2]
+        row['roadMean'] = means.ix[0:row.name,row.teamIdRoad].iloc[-2]
+        row['homeStd'] = stds.ix[0:row.name,row.teamIdHome].iloc[-2]
+        row['roadStd'] = stds.ix[0:row.name,row.teamIdRoad].iloc[-2]
+    return row
+
+# calculate win probability
+def win_prob_2(row,homeBonusMean,homeBonusStd):
+    delta_mu = row.homeMean - row.roadMean + homeBonusMean
+    denom = np.sqrt(row.homeStd**2 + row.roadStd**2 + homeBonusStd)
+    return norm.cdf(delta_mu / denom)
+
+# get optimal cutoff using roc_curve
+def get_optimal_cutoff(target, predicted):
+    fpr, tpr, threshold = mt.roc_curve(target, predicted)
+    i = np.arange(len(tpr)) 
+    roc = pd.DataFrame({'tf' : pd.Series(tpr-(1-fpr), index=i), 'threshold' : pd.Series(threshold, index=i)})
+    roc_t = roc.ix[(roc.tf-0).abs().argsort()[:1]]
+    return list(roc_t['threshold'])
 
 if __name__ == '__main__':
-    # TrueSkill params
-    TSK_MEAN = 25.0
-    TSK_SIGMA = TSK_MEAN/6.
-    TSK_BETA = TSK_MEAN/3.
-    TSK_TAU = TSK_MEAN/300.
-    TSK_DRAW_PROB = 0.0
-    TSK_HOME_BONUS = TSK_MEAN/10.
-
-    # Trueskill setup
-    env=ts.TrueSkill(
-        mu=TSK_MEAN,
-        sigma=TSK_SIGMA,
-        beta=TSK_BETA,
-            tau=TSK_TAU,
-        draw_probability=TSK_DRAW_PROB)
 
     df = read_dataset()
+    
+    # MANUAL PORTION
+    # --------
+    # save_for_infernet(df)
+    # df,means,std = merge_with_infernet(df)
+    # --------
 
-    season = 2011
-    teams, dfs = trueskill_forward_pass(df,season,n_iter=1)
-    dfs = get_rest_days(dfs)
+    # merge with schedule
+    # today = dt.date.today().strftime('%Y-%m-%d')
+    # sch = get_schedule_by_dates(today,today)
 
-    dfs['winProb'] = dfs.apply(win_probability,axis=1)
+    # # moving average of trueskill by team
+    # meansByTeam,stdsByTeam = get_tsk_by_team(df,window=10)
+    # df = df.apply(lambda row: get_previous_tsk(row,meansByTeam,stdsByTeam),axis=1)
+    # df['winProb'] = df.apply(lambda row: win_prob_2(row,131, 127.4),axis=1)
+    # df = get_rest_days(df)
 
-    features=[
-        'preMeanHome',
-        'preStdHome',
-        'preMeanRoad',
-        'preStdRoad',
-        'restDaysHome',
-        'restDaysRoad',
-    ]
-    gbm,imp,true,pred = run_single_xgboost(dfs,features,"winsHome",10,100)
-    get_evaluation(true,pred,0.5)
+    # features=[
+    #     'homeMean',
+    #     'homeStd',
+    #     'roadMean',
+    #     'roadStd',
+    #     'restDaysHome',
+    #     'restDaysRoad'
+    # ]
+    
+    # gbm,imp,true,pred = run_single_xgboost(df[df.seasonId>2013],features,"winsHome",10,100)
+    # threshold = get_optimal_cutoff(true,pred)
+    # get_evaluation(true,pred,threshold)
+
+
+
 
