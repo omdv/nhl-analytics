@@ -1,15 +1,13 @@
-#TODO: new season adds uncertainty tau
-#TODO: vary beta
-
+import matplotlib
+matplotlib.use("Agg")
 import pandas as pd
 import numpy as np
 import trueskill as ts
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import xgboost as xgb
 import datetime as dt
 import seaborn as sns
+import pickle
 from scipy.optimize import minimize
 from scipy.stats import norm
 from sklearn import metrics as mt
@@ -24,7 +22,7 @@ pd.options.display.float_format = '{:.2f}'.format
 engine = create_engine('postgresql://postgres:@192.168.99.100:5432/nhlstats')
 
 def read_dataset():
-    print("Load csv...")
+    print("Load dataset...")
     df = pd.read_sql('team_stats_by_game',engine,parse_dates=['gameDate'])
 
     # choose only nhl games
@@ -37,23 +35,21 @@ def read_dataset():
 
     print('Process dataset...')
     df['gameType'],fct = pd.factorize(df.gameType)
-    df = df.set_index('gameId').sort_values(by='gameDate')
+    df = df.sort_values(by='gameId')
     return df
 
 def merge_with_schedule(df,sch):
-    print("Merging df with new games...")
+    print("Merging with new games...")
 
-    del sch['gameId']
     df = pd.concat([df,sch])
 
     del df['dtindex']
     df['dtindex'] = pd.DatetimeIndex(df.gameDate)
-    startDate = df[df.gameId==2005020001].dtindex
+    startDate = df.gameDate.min()
     df['timeShift'] = df.apply(lambda row: (row.dtindex-startDate), axis=1)
     df['timeShift'] = df.apply(lambda row: row['timeShift'].days, axis=1)    
-    df = df.set_index('gameId').sort_values(by='gameDate')
+    df = df.reset_index().sort_values(by='gameDate')
     return df
-
 
 def v_function(t,e):
     denom = norm.cdf(t-e)
@@ -308,7 +304,7 @@ def get_importance(gbm, features):
     return importance
 
 def save_for_infernet(df):
-    df = df.reset_index().set_index('gameDate')
+    # df = df.reset_index().set_index('gameDate')
 
     fields = [
         'teamIdHome',
@@ -319,8 +315,14 @@ def save_for_infernet(df):
         'gameId'
     ]
     short = df[fields].sort_values(by='gameId')
+    short['timeShift'],fct = pd.factorize(short.timeShift)
+
+    with open('timeShift.fct','wb') as fp:
+        pickle.dump(fct,fp)
+
     short.to_csv('trueskill_in.csv',index=False)
-    return short
+    print("Saved for Infer.net: {0}".format(short.timeShift.max()+1))
+    return short.timeShift.max()+1
 
 def merge_with_infernet(df):
     tsk = pd.read_csv('trueskill_out.csv',sep="|",header=None)
@@ -337,6 +339,7 @@ def merge_with_infernet(df):
     std = tsk.applymap(lambda x: float(str(x)[9:-1].split(",")[1]))
     std = std.stack().reset_index()
     std.columns = ['timeShift','teamId','tsMean']
+    std.tsMean = np.sqrt(std.tsMean)
 
     for key in ['teamIdHome','teamIdRoad']:
         df = pd.merge(df,std,left_on=['timeShift',key],right_on=['timeShift','teamId'],how='left')
@@ -348,6 +351,7 @@ def merge_with_infernet(df):
 
 # function to get trueskill by team
 def get_tsk_by_team(df,window=10):
+    print("Calculating trueskill evolution for every team")
     meanByTeam = {}
     stdByTeam = {}
     for team in df.teamIdHome.unique():
@@ -357,18 +361,9 @@ def get_tsk_by_team(df,window=10):
             df[df.teamIdRoad==team].teamIdRoadStd]).sort_index()
     meanByTeam = pd.DataFrame(meanByTeam)
     stdByTeam = pd.DataFrame(stdByTeam)
-    meanByTeam = meanByTeam.rolling(window=window,min_periods=1).mean()
-    stdByTeam = stdByTeam.rolling(window=window,min_periods=1).mean()
+    # meanByTeam = meanByTeam.rolling(window=window,min_periods=1).mean()
+    # stdByTeam = stdByTeam.rolling(window=window,min_periods=1).mean()
     return meanByTeam,stdByTeam
-
-# get previous trueskill for the team for the current game
-def get_previous_tsk(row,means,stds):
-    if row.name > 0:
-        row['homeMean'] = means.ix[0:row.name,row.teamIdHome].iloc[-2]
-        row['roadMean'] = means.ix[0:row.name,row.teamIdRoad].iloc[-2]
-        row['homeStd'] = stds.ix[0:row.name,row.teamIdHome].iloc[-2]
-        row['roadStd'] = stds.ix[0:row.name,row.teamIdRoad].iloc[-2]
-    return row
 
 # calculate win probability
 def win_prob_2(row,homeBonusMean,homeBonusStd):
@@ -390,17 +385,26 @@ if __name__ == '__main__':
     
     # MANUAL PORTION
     # --------
-    # save_for_infernet(df)
-    # df,means,std = merge_with_infernet(df)
+    save_for_infernet(df)
+    # df,means,stds = merge_with_infernet(df)
     # --------
 
-    # merge with schedule
+    # # merge with schedule
     # today = dt.date.today().strftime('%Y-%m-%d')
     # sch = get_schedule_by_dates(today,today)
+    # df = merge_with_schedule(df,sch)
 
-    # # moving average of trueskill by team
-    # meansByTeam,stdsByTeam = get_tsk_by_team(df,window=10)
-    # df = df.apply(lambda row: get_previous_tsk(row,meansByTeam,stdsByTeam),axis=1)
+    # # pivot means and std by team
+    # print("Pivot infer.net output by team...")
+    # meansByTeam = means.pivot(index='timeShift',columns='teamId',values='tsMean')
+    # stdsByTeam = stds.pivot(index='timeShift',columns='teamId',values='tsMean')
+
+    # print("Shift skill forward...")
+    # missingDays = df[df.winsHome.isnull()].timeShift.unique()
+    # meansByTeam.ix(meansByTeam.index.max()+1,:) = np.nan
+    # stdsByTeam.ix(stdsByTeam.index.max()+1,:) = np.nan
+
+
     # df['winProb'] = df.apply(lambda row: win_prob_2(row,131, 127.4),axis=1)
     # df = get_rest_days(df)
 
