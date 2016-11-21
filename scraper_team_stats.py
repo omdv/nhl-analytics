@@ -35,42 +35,16 @@ def get_team_summary_by_season(season):
     data = json.loads(res.content.decode('utf-8'))
     return pd.DataFrame(data['data'])
 
-
-if __name__ == '__main__':
-    seasonId = ['20062007','20072008','20082009','20092010','20102011',\
-    '20112012','20122013','20132014','20142015','20152016']
-
-#SCRAPER PART
-    # mapping first season
-    df = get_team_summary_by_season('20162017')
-
-    # # iterate over seasons
-    # for season in seasonId:
-    #   time.sleep(10)
-    #   df = pd.concat([df,get_team_summary_by_season(season)])
-
-#PROCESSING PART
-    df.drop_duplicates(inplace=True)
+def save_team_summary_to_sql(season):
+    df = get_team_summary_by_season(season)
 
     # add season ID and gameTypeId
     df['seasonId'] = df.apply(lambda x: int(str(x.gameId)[0:4]),axis=1)
     df['gameType'] = df.apply(lambda x: int(str(x.gameId)[5:6]),axis=1)
-
-    df.gameType = df.gameType.astype('category')
-    df.gameType = df.gameType.cat.rename_categories(['R','C1','C2','C3'])
+    df = df[df.gameType.isin([2,3])]
 
     del df['ties']
     del df['gamesPlayed']
-
-    dfh = df[df.gameLocationCode=='H']
-    dfr = df[df.gameLocationCode=='R']
-
-    dfh.columns = [x+'Home' for x in dfh.columns]
-    dfr.columns = [x+'Road' for x in dfr.columns]
-    dfh.rename(columns={'gameIdHome':'gameId'},inplace=True)
-    dfr.rename(columns={'gameIdRoad':'gameId'},inplace=True)
-
-    df = pd.merge(dfh,dfr,on='gameId',how='left')
 
     # get if OT was played
     df['otPlayed'] = np.logical_or(df.otLossesHome,df.otLossesRoad).astype(np.int8)
@@ -109,12 +83,99 @@ if __name__ == '__main__':
         'seasonIdHome':'seasonId',
         'gameTypeHome':'gameType'},\
       inplace=True)
-    # df = df.set_index('gameId')
 
     # merge with existing
     df_old = pd.read_sql('team_stats_by_game',engine)
     df = pd.concat([df_old,df])
     df.drop_duplicates(inplace=True)
+    
+    df.set_index('gameId',inplace=True)
+
+    df.to_sql('team_stats_by_game',engine,if_exists='replace')
+    return 0
+
+
+if __name__ == '__main__':
+    seasonId = ['20062007','20072008','20082009','20092010','20102011',\
+    '20112012','20122013','20132014','20142015','20152016','20162017']
+
+#SCRAPER PART
+    # mapping first season
+    df = get_team_summary_by_season('20052006')
+
+    # iterate over seasons
+    for season in seasonId:
+      time.sleep(10)
+      df = pd.concat([df,get_team_summary_by_season(season)])
+
+#PROCESSING PART
+    df.drop_duplicates(inplace=True)
+
+    # add season ID and gameTypeId
+    df['seasonId'] = df.apply(lambda x: int(str(x.gameId)[0:4]),axis=1)
+    df['gameType'] = df.apply(lambda x: int(str(x.gameId)[5:6]),axis=1)
+    df = df[df.gameType.isin([2,3])]
+
+    # df.gameType = df.gameType.astype('category')
+    # df.gameType = df.gameType.cat.rename_categories(['R'])
+
+    del df['ties']
+    del df['gamesPlayed']
+    df.sort_values(by='gameId',inplace=True)
+
+    # dfh = df[df.gameLocationCode=='H']
+    # dfr = df[df.gameLocationCode=='R']
+
+    # dfh.columns = [x+'Home' for x in dfh.columns]
+    # dfr.columns = [x+'Road' for x in dfr.columns]
+    # dfh.rename(columns={'gameIdHome':'gameId'},inplace=True)
+    # dfr.rename(columns={'gameIdRoad':'gameId'},inplace=True)
+
+    # df = pd.merge(dfh,dfr,on='gameId',how='left')
+
+    # get if OT was played
+    # df['otPlayed'] = np.logical_or(df.otLosses,df.otLossesRoad).astype(np.int8)
+
+    # # remove correlated features
+    # for key in ['gameLocationCodeHome',
+    # 'gameLocationCodeRoad',
+    # 'opponentTeamAbbrevHome',
+    # 'opponentTeamAbbrevRoad',
+    # 'faceoffWinPctgRoad',
+    # 'faceoffsLostRoad',
+    # 'faceoffsWonRoad',
+    # 'shotsForRoad',
+    # 'shotsAgainstRoad',
+    # 'goalsForRoad',
+    # 'goalsAgainstRoad',
+    # 'ppGoalsAgainstRoad',
+    # 'ppGoalsForRoad',
+    # 'gameTypeRoad',
+    # 'seasonIdRoad',
+    # 'gameDateRoad',
+    # 'lossesHome',
+    # 'lossesRoad',
+    # 'winsRoad',
+    # 'otLossesHome',
+    # 'otLossesRoad',
+    # 'ppOpportunitiesRoad',
+    # 'shNumTimesRoad',
+    # 'pointsHome',
+    # 'pointsRoad']:
+    #   del df[key]
+
+    # df.rename(\
+    #   columns={
+    #     'gameDateHome':'gameDate',
+    #     'seasonIdHome':'seasonId',
+    #     'gameTypeHome':'gameType'},\
+    #   inplace=True)
+    # df = df.set_index('gameId')
+
+    # merge with existing
+    # df_old = pd.read_sql('team_stats_by_game',engine)
+    # df = pd.concat([df_old,df])
+    # df.drop_duplicates(inplace=True)
     
     df.set_index('gameId',inplace=True)
 

@@ -14,6 +14,9 @@ from sklearn import metrics as mt
 from sklearn.cross_validation import train_test_split
 from sqlalchemy import create_engine
 from scraper_schedule import get_schedule_by_dates
+from scraper_team_stats import get_team_summary_by_season
+from subprocess import call
+
 
 np.random.seed(42)
 pd.options.display.float_format = '{:.2f}'.format
@@ -303,6 +306,7 @@ def get_importance(gbm, features):
     importance = importance/1.e-2/importance.values.sum()
     return importance
 
+# Saving dataframe in a short format for Infer.net. Timeshift is considered by days. Days are factorized, factors are saved
 def save_for_infernet(df):
     # df = df.reset_index().set_index('gameDate')
 
@@ -315,13 +319,13 @@ def save_for_infernet(df):
         'gameId'
     ]
     short = df[fields].sort_values(by='gameId')
-    short['timeShift'],fct = pd.factorize(short.timeShift)
+    # short['timeShift'],fct = pd.factorize(short.timeShift)
 
-    with open('timeShift.fct','wb') as fp:
-        pickle.dump(fct,fp)
+    # with open('timeShift.fct','wb') as fp:
+        # pickle.dump(fct,fp)
 
     short.to_csv('trueskill_in.csv',index=False)
-    print("Saved for Infer.net: {0}".format(short.timeShift.max()+1))
+    print("Saved for Infer.net: {0} time periods".format(short.timeShift.max()+1))
     return short.timeShift.max()+1
 
 def merge_with_infernet(df):
@@ -339,13 +343,13 @@ def merge_with_infernet(df):
     std = tsk.applymap(lambda x: float(str(x)[9:-1].split(",")[1]))
     std = std.stack().reset_index()
     std.columns = ['timeShift','teamId','tsMean']
-    std.tsMean = np.sqrt(std.tsMean)
+    std.tsMean = std.tsMean
 
     for key in ['teamIdHome','teamIdRoad']:
         df = pd.merge(df,std,left_on=['timeShift',key],right_on=['timeShift','teamId'],how='left')
         del df['teamId']
         df.rename(columns={'tsMean':key+'Std'}, inplace=True)
-        df[key+'Std'] = np.sqrt(df[key+'Std'])
+        df[key+'Std'] = df[key+'Std']
 
     return df,means,std
 
@@ -381,46 +385,57 @@ def get_optimal_cutoff(target, predicted):
 
 if __name__ == '__main__':
 
+
+    # get_team_summary_by_season('20162017')
     df = read_dataset()
     
-    # MANUAL PORTION
     # --------
-    save_for_infernet(df)
-    # df,means,stds = merge_with_infernet(df)
+    nYears = save_for_infernet(df)
+    call("mono /Users/om/Documents/Visual\ Studio\ 2015/Projects/TrueSkillTT/TrueSkillTT/bin/Release/TrueSkillTT.exe "+str(nYears),shell=True)
+    df,means,stds = merge_with_infernet(df)
     # --------
 
     # # merge with schedule
-    # today = dt.date.today().strftime('%Y-%m-%d')
-    # sch = get_schedule_by_dates(today,today)
-    # df = merge_with_schedule(df,sch)
+    today = dt.date.today().strftime('%Y-%m-%d')
+    sch = get_schedule_by_dates(today,today)
+    df = merge_with_schedule(df,sch)
 
-    # # pivot means and std by team
-    # print("Pivot infer.net output by team...")
-    # meansByTeam = means.pivot(index='timeShift',columns='teamId',values='tsMean')
-    # stdsByTeam = stds.pivot(index='timeShift',columns='teamId',values='tsMean')
+    # pivot means and std by team
+    print("Pivot infer.net output by team...")
+    meansByTeam = means.pivot(index='timeShift',columns='teamId',values='tsMean')
+    stdsByTeam = stds.pivot(index='timeShift',columns='teamId',values='tsMean')
 
-    # print("Shift skill forward...")
-    # missingDays = df[df.winsHome.isnull()].timeShift.unique()
-    # meansByTeam.ix(meansByTeam.index.max()+1,:) = np.nan
-    # stdsByTeam.ix(stdsByTeam.index.max()+1,:) = np.nan
-
+    # shift skill by team forward, use last value
+    # TODO: this needs to be run daily, otherwise the gap between current time and last value will be too big
+    print("Assigning last value of the skill...")
+    missingGames = df[df.winsHome.isnull()].gameId.unique()
+    for g in missingGames:
+        teamHome = df.ix[df.gameId == g,'teamIdHome'].values[0]
+        teamRoad = df.ix[df.gameId == g,'teamIdRoad'].values[0]
+        df.ix[df.gameId == g,'teamIdHomeMean'] = meansByTeam.ix[meansByTeam.index.max(),teamHome]
+        df.ix[df.gameId == g,'teamIdRoadMean'] = meansByTeam.ix[meansByTeam.index.max(),teamRoad]
+        df.ix[df.gameId == g,'teamIdHomeStd'] = stdsByTeam.ix[stdsByTeam.index.max(),teamHome]
+        df.ix[df.gameId == g,'teamIdRoadStd'] = stdsByTeam.ix[stdsByTeam.index.max(),teamRoad]
 
     # df['winProb'] = df.apply(lambda row: win_prob_2(row,131, 127.4),axis=1)
     # df = get_rest_days(df)
 
-    # features=[
-    #     'homeMean',
-    #     'homeStd',
-    #     'roadMean',
-    #     'roadStd',
-    #     'restDaysHome',
-    #     'restDaysRoad'
-    # ]
+    features=[
+        'homeMean',
+        'homeStd',
+        'roadMean',
+        'roadStd',
+        'restDaysHome',
+        'restDaysRoad'
+    ]
     
-    # gbm,imp,true,pred = run_single_xgboost(df[df.seasonId>2013],features,"winsHome",10,100)
-    # threshold = get_optimal_cutoff(true,pred)
-    # get_evaluation(true,pred,threshold)
-
+    gbm,imp,true,pred = run_single_xgboost(df[df.seasonId>2013],features,"winsHome",10,100)
+    threshold = get_optimal_cutoff(true,pred)
+    get_evaluation(true,pred,threshold)
+    
+    # assign probability and result based on threshold
+    df['gamePredProb'] = pred
+    df['gamePredWins'] = np.where(pred>ths,1,0)
 
 
 
